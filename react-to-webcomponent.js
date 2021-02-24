@@ -1,6 +1,7 @@
 const reactComponentSymbol = Symbol.for('r2wc.reactComponent');
 const renderSymbol = Symbol.for('r2wc.reactRender');
 const shouldRenderSymbol = Symbol.for('r2wc.shouldRender');
+const connectedSymbol = Symbol.for('r2wc.connected');
 
 const define = {
 	// Creates a getter/setter that re-renders every time a property is set.
@@ -18,6 +19,29 @@ const define = {
 		receiver[renderSymbol]();
 	},
 };
+
+let count = 0;
+function wrapDomEleInComponent(value, React) {
+	return React.createElement(
+		function ({ value }) {
+			const ref = React.createRef();
+
+			// After dom element is ready
+			React.useEffect(() => {
+				const { current: ele } = ref;
+				value.forEach((childNode) => {
+					ele.parentNode.append(childNode);
+				});
+
+				// Clean up template container
+				ele.remove();
+			});
+
+			return <template ref={ref}></template>;
+		},
+		{ key: `dynamicElement${count++}`, value }
+	);
+}
 
 /**
  * Converts a React component into a webcomponent by wrapping it in a Proxy object.
@@ -41,6 +65,7 @@ export default function (ReactComponent, React, ReactDOM, options = {}) {
 		if (options.shadow) {
 			self.attachShadow({ mode: 'open' });
 		}
+
 		return self;
 	};
 
@@ -57,18 +82,22 @@ export default function (ReactComponent, React, ReactDOM, options = {}) {
 		// when any undefined property is set, create a getter/setter that re-renders
 		set: function (target, key, value, receiver) {
 			if (typeof key === 'string' && !(key in proxyPrototype)) {
-				// Do not actually assign if these values
-				if (key === '__ngContext__' || key.startsWith('__zone_symbol')) return true;
-
 				// Prepend 'on' and capitalize first char when we have a dom event
 				if (key.startsWith('_on')) key = `on${key.charAt(3).toUpperCase()}${key.slice(4)}`;
 			}
 
-			if (rendering) renderAddedProperties[key] = true;
+			const libKey =
+				typeof key === 'string' &&
+				(key === '__ngContext__' ||
+					key.startsWith('__zone_symbol') ||
+					key.startsWith('__reactContainer') ||
+					key.startsWith('_reactRootContainer'));
 
-			console.log('set prop', { target, key, value, receiver });
+			if (rendering) {
+				renderAddedProperties[key] = !libKey;
+			}
 
-			if (typeof key === 'symbol' || renderAddedProperties[key] || key in target) {
+			if (libKey || typeof key === 'symbol' || renderAddedProperties[key] || key in target) {
 				return Reflect.set(target, key, value, receiver);
 			} else {
 				define.expando(receiver, key, value);
@@ -90,8 +119,13 @@ export default function (ReactComponent, React, ReactDOM, options = {}) {
 
 	// Setup lifecycle methods
 	targetPrototype.connectedCallback = function () {
-		const innerHTML = this.innerHTML.trim();
-		if (innerHTML) define.expando(this, 'children', innerHTML);
+		if (this[connectedSymbol] === true) return;
+		this[connectedSymbol] = true;
+
+		if (this.childNodes.length) {
+			// const dynamicChildElement = wrapDomEleInComponent(Array.from(this.childNodes), React);
+			define.expando(this, 'children', this.innerText);
+		}
 
 		// Once connected, it will keep updating the innerHTML.
 		// We could add a render method to allow this as well.
@@ -99,7 +133,7 @@ export default function (ReactComponent, React, ReactDOM, options = {}) {
 		this[renderSymbol]();
 	};
 	targetPrototype[renderSymbol] = function () {
-		if (this[shouldRenderSymbol] === true) {
+		if (this[shouldRenderSymbol] === true && !rendering) {
 			const data = {};
 			Object.keys(this).forEach(function (key) {
 				if (renderAddedProperties[key] !== false) {
@@ -107,10 +141,16 @@ export default function (ReactComponent, React, ReactDOM, options = {}) {
 				}
 			}, this);
 			rendering = true;
+
 			// Container is either shadow DOM or light DOM depending on `shadow` option.
 			const container = options.shadow ? this.shadowRoot : this;
+
+			// Create and store react component
+			this[reactComponentSymbol] = React.createElement(ReactComponent, data);
+
 			// Use react to render element in container
-			this[reactComponentSymbol] = ReactDOM.render(React.createElement(ReactComponent, data), container);
+			ReactDOM.render(this[reactComponentSymbol], container);
+
 			rendering = false;
 		}
 	};
